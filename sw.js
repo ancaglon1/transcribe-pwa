@@ -16,10 +16,12 @@ async function handleShare(request) {
   // Use dynamic hostname from the request — not hardcoded
   const reqUrl = new URL(request.url);
   // HTTPS (Tailscale) → port 9443, HTTP → port 9000
+  // GitHub Pages hostname → use Tailscale hostname instead
   const apiPort = reqUrl.protocol === 'https:' ? '9443' : '9000';
-  const apiBase = reqUrl.hostname === 'localhost' || reqUrl.hostname === '127.0.0.1'
+  const host = reqUrl.hostname.endsWith('.github.io') ? 'comfy.osiris-eel.ts.net' : reqUrl.hostname;
+  const apiBase = host === 'localhost' || host === '127.0.0.1'
     ? 'http://comfy:' + apiPort
-    : reqUrl.protocol + '//' + reqUrl.hostname + ':' + apiPort;
+    : reqUrl.protocol + '//' + host + ':' + apiPort;
 
   const body = new FormData();
   body.append('file', audio, audio.name);

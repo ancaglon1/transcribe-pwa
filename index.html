@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="manifest" href="/manifest.json">
+<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#111">
 <title>Transcribe</title>
 <style>
@@ -364,7 +364,7 @@ if ('Notification' in window && Notification.permission === 'default') {
 
 // Register SW
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js');
+  navigator.serviceWorker.register('sw.js');
 }
 
 // Show history on load
