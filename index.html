@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#111">
+<title>Transcribe</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,sans-serif; background:#111; color:#eee; min-height:100dvh; display:flex; flex-direction:column; }
+header { padding:16px; border-bottom:1px solid #222; display:flex; align-items:center; gap:10px; }
+header h1 { font-size:18px; font-weight:600; color:#8af; }
+main { flex:1; display:flex; flex-direction:column; padding:16px; gap:16px; }
+#dropzone { border:2px dashed #333; border-radius:12px; padding:40px 20px; text-align:center; cursor:pointer; transition:.2s; }
+#dropzone.dragover { border-color:#8af; background:#1a2a3a; }
+#dropzone.has-file { border-color:#4a4; background:#1a2a1a; }
+#dropzone p { color:#666; font-size:14px; }
+#dropzone .fn { color:#8af; font-size:13px; margin-top:8px; display:none; }
+#dropzone.has-file .fn { display:block; }
+#progress { display:none; }
+#progress.show { display:block; }
+.progress-bar { height:4px; background:#222; border-radius:2px; overflow:hidden; margin-top:12px; }
+.progress-bar div { height:100%; background:#8af; transition:width .5s; width:0; }
+.progress-bar.indeterminate div { width:30%; animation:indeterminate 1.5s ease-in-out infinite; }
+@keyframes indeterminate {
+  0% { transform:translateX(-100%); }
+  100% { transform:translateX(400%); }
+}
+#status { font-size:13px; color:#888; margin-top:8px; }
+#output { display:none; flex-direction:column; gap:12px; }
+#output.show { display:flex; }
+#output pre { background:#1a1a1a; border-radius:8px; padding:12px; font-size:13px; line-height:1.5; max-height:50vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; }
+.actions { display:flex; gap:8px; }
+.actions button { flex:1; padding:10px; border:none; border-radius:8px; font-size:14px; font-weight:500; cursor:pointer; }
+.btn-copy { background:#2a4; color:#fff; }
+.btn-share { background:#48a; color:#fff; }
+.btn-save { background:#555; color:#fff; }
+#error { display:none; color:#f66; font-size:13px; text-align:center; padding:8px; }
+#error.show { display:block; }
+#log { font-size:11px; color:#444; max-height:100px; overflow-y:auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎤 Transcribe</h1>
+  <span style="font-size:11px;color:#555;margin-left:auto">Whisper GPU</span>
+</header>
+
+<main>
+  <div id="dropzone" onclick="document.getElementById('fileInput').click()">
+    <p>Tap to choose audio<br><span style="font-size:11px;color:#555">or share from another app</span></p>
+    <div class="fn"></div>
+    <input type="file" id="fileInput" accept="audio/*,video/mp4" hidden>
+  </div>
+
+  <div id="progress">
+    <div class="progress-bar" id="progress-bar"><div id="bar"></div></div>
+    <div id="status">Starting...</div>
+  </div>
+
+  <div id="output">
+    <pre id="transcript"></pre>
+    <div class="actions">
+      <button class="btn-copy" onclick="copyText()">📋 Copy</button>
+      <button class="btn-share" onclick="shareText()">📤 Share</button>
+      <button class="btn-save" onclick="saveText()">💾 Save</button>
+    </div>
+  </div>
+
+  <div id="error"></div>
+
+  <details id="history" style="margin-top:8px">
+    <summary style="color:#555;font-size:12px;cursor:pointer">📋 History</summary>
+    <div id="history-list"></div>
+  </details>
+
+  <div id="log"></div>
+</main>
+
+<script>
+// API endpoint: HTTPS (via Tailscale) → port 9443, HTTP → port 9000
+// Override with ?api= query parameter (for GitHub Pages deployment)
+const API = new URLSearchParams(location.search).get('api')
+  || (window.location.protocol === 'https:'
+    ? 'https://' + window.location.hostname + ':9443'
+    : window.location.origin.includes('localhost')
+      ? 'http://comfy:9000'
+      : window.location.protocol + '//' + window.location.hostname + ':9000');
+let currentText = '';
+let polling = false;
+let activeJobId = null;  // track for visibility refresh
+
+document.getElementById('fileInput').onchange = e => {
+  if (e.target.files[0]) startTranscription(e.target.files[0]);
+};
+
+const dz = document.getElementById('dropzone');
+dz.ondragover = e => { e.preventDefault(); dz.classList.add('dragover'); };
+dz.ondragleave = () => dz.classList.remove('dragover');
+dz.ondrop = e => {
+  e.preventDefault();
+  dz.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) startTranscription(file);
+};
+
+// Handle share-target redirect
+const params = new URLSearchParams(location.search);
+if (params.get('job')) pollJob(params.get('job'));
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+async function startTranscription(file) {
+  document.getElementById('output').classList.remove('show');
+  document.getElementById('error').classList.remove('show');
+  dz.querySelector('.fn').textContent = file.name;
+  dz.classList.add('has-file');
+  document.getElementById('progress').classList.add('show');
+  setStatus('Uploading...');
+  setBar(5);
+
+  const formData = new FormData();
+  formData.append('file', file, file.name);
+
+  try {
+    const resp = await fetch(`${API}/transcribe`, { method: 'POST', body: formData });
+    const data = await resp.json();
+    log(`Job ${data.job_id} queued`);
+    pollJob(data.job_id);
+  } catch(e) {
+    showError(`Upload failed: ${e.message}`);
+  }
+}
+
+async function pollJob(jobId) {
+  if (polling) return;
+  polling = true;
+  activeJobId = jobId;
+  const start = Date.now();
+
+  while (true) {
+    try {
+      const resp = await fetch(`${API}/status/${jobId}`);
+      const data = await resp.json();
+      log(`${data.status}${data.segments ? ' ('+data.segments+' segs)' : ''}`);
+
+      if (data.status === 'done') {
+        activeJobId = null;
+        setStatus(`Done in ${((Date.now()-start)/1000).toFixed(0)}s`);
+        setBar(100);
+        setIndeterminate(false);
+        await showResult(jobId);
+        saveToHistory(jobId, data.file_size_mb);
+        notify('Transcription complete');
+        break;
+      }
+      if (data.status === 'error') {
+        activeJobId = null;
+        showError(data.error || 'Transcription failed');
+        setIndeterminate(false);
+        break;
+      }
+      // Fetch real progress + partial transcript for streaming
+      let progressSec = 0;
+      try {
+        const pr = await fetch(API + '/progress/' + jobId);
+        const pd = await pr.json();
+        progressSec = pd.progress_sec || 0;
+      } catch(e) {}
+      // Show progressively transcribed text while processing
+      if (data.status === 'running' || data.status === 'queued') {
+        try {
+          const pr2 = await fetch(API + '/partial/' + jobId);
+          if (pr2.ok) {
+            const partial = await pr2.text();
+            if (partial.length > (currentText || '').length + 20) {
+              currentText = partial;
+              document.getElementById('transcript').textContent = partial;
+              document.getElementById('output').classList.add('show');
+              // Auto-scroll as text comes in
+              const pre = document.getElementById('transcript');
+              pre.scrollTop = pre.scrollHeight;
+            }
+          }
+        } catch(e) {}
+      }
+      const elapsed = data.started_at
+        ? Math.round((Date.now() - new Date(data.started_at).getTime()) / 1000)
+        : Math.round((Date.now() - start) / 1000);
+      function fmt(s) { let m = Math.floor(s / 60); let sec = s % 60; return m > 0 ? m + ':' + String(sec).padStart(2, '0') : sec + 's'; }
+      if (data.status === 'queued') {
+        setStatus('Waiting… (' + elapsed + 's)');
+        setIndeterminate(true);
+      } else if (progressSec > 0 && data.audio_duration_sec > 0) {
+        const pct = Math.min(99, Math.round(progressSec / data.audio_duration_sec * 100));
+        setStatus('Processing… at ' + fmt(Math.round(progressSec)) + ' of ' + fmt(Math.round(data.audio_duration_sec)) + ' (' + pct + '%)');
+        setBar(pct);
+        setIndeterminate(false);
+      } else {
+        setStatus('Processing… (' + elapsed + 's)');
+        setIndeterminate(true);
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    } catch(e) {
+      log(`Poll error: ${e.message}`);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+  polling = false;
+}
+
+async function showResult(jobId) {
+  const resp = await fetch(`${API}/result/${jobId}`);
+  const text = await resp.text();
+  currentText = text;
+  document.getElementById('transcript').textContent = text;
+  document.getElementById('output').classList.add('show');
+}
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+function setBar(pct) { 
+  const bar = document.getElementById('bar');
+  const prog = document.getElementById('progress-bar');
+  bar.style.width = pct + '%';
+  if (pct === 100) prog.classList.remove('indeterminate');
+}
+function setIndeterminate(on) {
+  document.getElementById('progress-bar').classList.toggle('indeterminate', on);
+}
+
+function saveToHistory(jobId, size) {
+  // Don't need localStorage anymore — API has /jobs
+  // Just render from API
+  renderHistory();
+}
+async function renderHistory() {
+  const el = document.getElementById('history-list');
+  try {
+    const resp = await fetch(`${API}/jobs`);
+    const jobs = await resp.json();
+    if (!jobs.length) { el.innerHTML = '<p style="color:#444;font-size:12px">No transcripts yet</p>'; return; }
+    el.innerHTML = jobs.map(j => `<a href="#" onclick="loadJob('${j.job_id}');return false" style="display:block;padding:8px;color:#8af;font-size:13px;border-bottom:1px solid #222;text-decoration:none">
+      📄 ${j.original_filename || j.job_id} <span style="color:#555;font-size:11px">${new Date(j.created_at).toLocaleString()} ${j.segments ? '('+j.segments+' segs)' : ''}</span></a>`).join('');
+  } catch(e) {
+    el.innerHTML = '<p style="color:#444;font-size:12px">Could not load history</p>';
+  }
+}
+async function loadJob(jobId) {
+  const resp = await fetch(`${API}/result/${jobId}`);
+  if (!resp.ok) { showError('Transcript expired or not found'); return; }
+  currentText = await resp.text();
+  document.getElementById('transcript').textContent = currentText;
+  document.getElementById('output').classList.add('show');
+}
+
+function showError(msg) {
+  const el = document.getElementById('error');
+  el.textContent = msg;
+  el.classList.add('show');
+  setStatus(`Failed: ${msg}`);
+}
+
+function notify(msg) {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification('Transcribe', { body: msg, icon: '/icon.png' });
+  }
+}
+
+// Catch up when tab regains focus (mobile browser throttles polling)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && activeJobId) {
+    // Re-fetch both status and progress immediately
+    fetch(API + '/status/' + activeJobId).then(r => r.json()).then(data => {
+      if (data.status === 'done') {
+        setStatus('Done');
+        setBar(100);
+        setIndeterminate(false);
+        showResult(activeJobId);
+        renderHistory();
+        activeJobId = null;
+      } else if (data.status === 'error') {
+        activeJobId = null;
+      }
+    }).catch(() => {});
+    // Also re-fetch progress
+    fetch(API + '/progress/' + activeJobId).then(r => r.json()).then(pd => {
+      if (pd.progress_sec > 0) {
+        fetch(API + '/status/' + activeJobId).then(r => r.json()).then(data => {
+          if (data.audio_duration_sec) {
+            const pct = Math.min(99, Math.round(pd.progress_sec / data.audio_duration_sec * 100));
+            setBar(pct);
+            setIndeterminate(false);
+          }
+        }).catch(() => {});
+      }
+    }).catch(() => {});
+    // Refresh partial transcript text
+    fetch(API + '/partial/' + activeJobId).then(r => r.text()).then(text => {
+      if (text && text.length > 20) {
+        currentText = text;
+        document.getElementById('transcript').textContent = text;
+        document.getElementById('output').classList.add('show');
+      }
+    }).catch(() => {});
+  }
+});
+
+async function copyText() {
+  const btn = document.querySelector('.btn-copy');
+  try {
+    // Clipboard API (HTTPS)
+    await navigator.clipboard.writeText(currentText);
+  } catch {
+    // Fallback for HTTP — temp textarea + execCommand
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = currentText;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch {}
+  }
+  btn.textContent = '✅ Copied';
+  setTimeout(() => btn.textContent = '📋 Copy', 1500);
+}
+
+async function shareText() {
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Transcript', text: currentText });
+    } catch {}
+  } else {
+    copyText();
+  }
+}
+
+function saveText() {
+  const blob = new Blob([currentText], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'transcript.txt';
+  a.click();
+  // Delay revoke so download can start on mobile
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// Request notification permission
+if ('Notification' in window && Notification.permission === 'default') {
+  Notification.requestPermission();
+}
+
+// Register SW
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+}
+
+// Show history on load
+renderHistory();
+
+// Handle share-target redirect from SW
+</script>
+</body>
+</html>
