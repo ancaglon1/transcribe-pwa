@@ -17,11 +17,13 @@ async function handleShare(request) {
   const reqUrl = new URL(request.url);
   // HTTPS (Tailscale) → port 9443, HTTP → port 9000
   // GitHub Pages hostname → use Tailscale hostname instead
-  const apiPort = reqUrl.protocol === 'https:' ? '9443' : '9000';
   const host = reqUrl.hostname.endsWith('.github.io') ? 'comfy.osiris-eel.ts.net' : reqUrl.hostname;
-  const apiBase = host === 'localhost' || host === '127.0.0.1'
-    ? 'http://comfy:' + apiPort
-    : reqUrl.protocol + '//' + host + ':' + apiPort;
+  // HTTPS uses /api path on port 443; HTTP uses port 9000
+  const apiBase = reqUrl.protocol === 'https:'
+    ? reqUrl.protocol + '//' + host + '/api'
+    : host === 'localhost' || host === '127.0.0.1'
+      ? 'http://comfy:9000'
+      : reqUrl.protocol + '//' + host + ':9000';
 
   const body = new FormData();
   body.append('file', audio, audio.name);
