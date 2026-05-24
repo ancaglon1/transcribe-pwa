@@ -80,14 +80,18 @@ main { flex:1; display:flex; flex-direction:column; padding:16px; gap:16px; }
 </main>
 
 <script>
-// API endpoint: HTTPS (via Tailscale) → port 9443, HTTP → port 9000
-// Override with ?api= query parameter (for GitHub Pages deployment)
+// API endpoint: ?api= override > HTTPS (Tailscale) > local > auto-detect
+// GitHub Pages: https://ancaglon1.github.io/transcribe-pwa/
+// Local access: http://comfy:8080 or http://192.168.5.187:8080
+// Tailscale HTTPS: https://comfy.osiris-eel.ts.net/
 const API = new URLSearchParams(location.search).get('api')
-  || (window.location.protocol === 'https:'
-    ? 'https://' + window.location.hostname + ':9443'
-    : window.location.origin.includes('localhost')
-      ? 'http://comfy:9000'
-      : window.location.protocol + '//' + window.location.hostname + ':9000');
+  || (window.location.hostname.endsWith('.github.io')
+    ? 'https://comfy.osiris-eel.ts.net:9443'
+    : window.location.protocol === 'https:'
+      ? 'https://' + window.location.hostname + ':9443'
+      : window.location.origin.includes('localhost')
+        ? 'http://comfy:9000'
+        : window.location.protocol + '//' + window.location.hostname + ':9000');
 let currentText = '';
 let polling = false;
 let activeJobId = null;  // track for visibility refresh
